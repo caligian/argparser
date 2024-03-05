@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
-
-	// "slices"
-	// "strconv"
 	"strings"
 )
 
@@ -35,8 +32,6 @@ type switch_ref struct {
 	ref      *Switch
 	pos      int
 	args     []string
-	is_first bool
-	is_last  bool
 }
 
 type switches map[string]*Switch
@@ -186,7 +181,6 @@ func (parser *Parser) Extract() *Parser {
 	parsed_slices_l := len(parsed_slices)
 	first := parsed_slices[0]
 	last := parsed_slices[parsed_slices_l-1]
-	first.is_first = true
 	argv := parser.Argv
 	l := len(argv)
 	validate_n := func(S *Switch) {
@@ -218,11 +212,7 @@ func (parser *Parser) Extract() *Parser {
 		}
 	}
 
-	if last != first {
-		last.is_last = true
-	}
-
-	if first.pos != 0 {
+  if first.pos != 0 {
 		parser.head_argv = argv[:first.pos]
 	}
 
@@ -277,6 +267,9 @@ func (parser *Parser) Extract() *Parser {
 			errf(ErrExcessArgs, last.ref)
 		}
 	}
+
+  parser.Positional = append(parser.Positional, parser.head_argv...)
+  parser.Positional = append(parser.Positional, parser.tail_argv...)
 
 	return parser
 }
