@@ -66,7 +66,7 @@ var ErrNameConflict = errors.New("cannot use the same name for positional args a
 //////////////////////////////////////////////////
 func getTermWidth() int {
 	defaultwidth := 60
-	if term.IsTerminal(0) {
+	if !term.IsTerminal(0) {
 		return defaultwidth
 	} else {
 		width, _, err := term.GetSize(0)
@@ -510,7 +510,7 @@ func (parser *Parser) genHeader() string {
 	scriptNameL := header.Len()
 	ws := strings.Repeat(" ", scriptNameL)
 
-	if scriptNameL > termWidth {
+	if scriptNameL > termWidth  {
 		header.WriteString("\n")
 		ws = strings.Repeat(" ", textWidth)
 		header.WriteString(ws)
@@ -522,7 +522,7 @@ func (parser *Parser) genHeader() string {
 		h := v.genHeader()
 		hL := len(h)
 
-		if totalLen >= termWidth {
+		if totalLen >= termWidth || totalLen + hL >= termWidth {
 			totalLen = 0
 			header.WriteString("\n")
 			header.WriteString(ws)
@@ -540,7 +540,7 @@ func (parser *Parser) genHeader() string {
 		h := v.genHeader(false)
 		hL := len(h)
 
-		if totalLen >= termWidth {
+		if totalLen >= termWidth || totalLen + hL >= termWidth {
 			totalLen = 0
 			header.WriteString("\n")
 			header.WriteString(ws)
@@ -621,7 +621,7 @@ func (S *keyword) genHelp() string {
 func (parser *Parser) genHelp() string {
 	res := strings.Builder{}
 	res.WriteString(parser.genHeader())
-	res.WriteString("\n\n")
+	res.WriteString("\n")
 	totalLen := 0
 
 	for _, v := range strings.Split(parser.Help, " ") {
@@ -706,5 +706,5 @@ func main() {
 	// fmt.Printf("%#v\n", res)
 	//fmt.Printf("%#v\n", argumentsMap["X"].genHeader())
 	// fmt.Printf("%s\n", keywordsMap["a-switch"].genHelp())
-	// println(parser.genHelp())
+	println(parser.genHelp())
 }
