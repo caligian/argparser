@@ -561,22 +561,27 @@ func (S *argument) genHelp() string {
 	res := strings.Builder{}
 	header := S.genHeader()
 	res.WriteString(header)
-	ws := strings.Repeat(" ", textWidth)
-	totalLen := 0
+  headerL := len(header)
+  r := textWidth/3
+  ws := strings.Repeat(" ", r)
+  totalLen := r
 
-	if diff := textWidth - len(header); diff > 0 {
-		more := strings.Repeat(" ", diff)
-		res.WriteString(more)
-	}
+	if r < headerL {
+    res.WriteString("\n")
+    res.WriteString(ws)
+	} else {
+    res.WriteString(strings.Repeat(" ", r - headerL))
+  }
 
 	for _, v := range strings.Split(S.opts.Help, " ") {
 		vL := len(v)
 
-		if totalLen >= textWidth || totalLen+vL >= textWidth {
+		if totalLen >= termWidth || totalLen+vL >= termWidth {
 			totalLen = 0
 			res.WriteString("\n")
 			res.WriteString(ws)
 			res.WriteString(v)
+      totalLen += r
 		} else {
 			res.WriteString(v)
 		}
@@ -592,21 +597,26 @@ func (S *keyword) genHelp() string {
 	res := strings.Builder{}
 	header := S.genHeader(true)
 	res.WriteString(header)
-	ws := strings.Repeat(" ", textWidth)
-	totalLen := 0
+  r := textWidth/3
+  ws := strings.Repeat(" ", r)
+  totalLen := r
+  headerL := len(header)
 
-	if diff := textWidth - len(header); diff > 0 {
-		more := strings.Repeat(" ", diff)
-		res.WriteString(more)
-	}
+  if r < headerL {
+    res.WriteString("\n")
+    res.WriteString(ws)
+  } else {
+    res.WriteString(strings.Repeat(" ", r - headerL))
+  }
 
-	for _, v := range strings.Split(S.opts.Help, " ") {
+  for _, v := range strings.Split(S.opts.Help, " ") {
 		vL := len(v)
-		if totalLen >= textWidth || totalLen+vL >= textWidth {
+		if totalLen >= termWidth || totalLen+vL >= termWidth {
 			totalLen = 0
 			res.WriteString("\n")
 			res.WriteString(ws)
 			res.WriteString(v)
+      totalLen += r
 		} else {
 			res.WriteString(v)
 		}
