@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"regexp"
@@ -11,51 +10,44 @@ import (
 	"strings"
 )
 
-type Switch struct {
+type Option struct {
 	Name            string
-	Names           []string
-	Value           []string
+	ShortName       string
+	LongName        string
 	Nargs           string
 	N               int
-	Enum            []string
+	Assert          func(s string) error
+	Metavar         string
+	Help            string
 	Map             func(s string) string
-	Assert          func(s string) (bool, string)
 	Requires        []string
 	Excludes        []string
-	AllowDuplicates bool
-	Optional        bool
-	Help            string
 	Required        bool
-	Found           bool
-	Metavar         string
+	Enum            []string
+	AllowDuplicates bool
 }
 
-type Positional struct {
-	Name    string
-	Metavar string
-	Assert  func(s string) (bool, string)
-	Map     func(s string) string
-	Help    string
-	Value   string
-	Enum    []string
+type argument struct {
+	name  string
+	value string
+	opts  *Option
 }
 
-type Names []string
+type keyword struct {
+	name  string
+	pos   int
+  allPos []int
+	value string
+	opts  *Option
+}
 
 type Parser struct {
-	Argv        []string
-	Desc        string
-	Header      string
-	Footer      string
-	ExitOnHelp  bool
-	Switches    map[string]*Switch
-	Positionals map[string]*Positional
-}
-
-type switch_ref struct {
-	ref  *Switch
-	pos  int
-	args []string
+	Argv       []string
+	Desc       string
+	Header     string
+	Footer     string
+	ExitOnHelp bool
+	Parsed     map[string][]string
 }
 
 //////////////////////////////////////////////////
@@ -63,7 +55,7 @@ var ErrMissingName = errors.New("expected short and/or long name")
 var ErrNoArgs = errors.New("no arguments passed")
 var ErrExcessArgs = errors.New("excess arguments passed")
 var ErrLessArgs = errors.New("not enough arguments passed")
-var ErrLessPositionalArgs = errors.New("not enough positional arguments passed")
+var ErrLessPosArgs = errors.New("not enough positional arguments passed")
 var ErrDuplicate = errors.New("cannot pass this switch more than once")
 var ErrInvalidNargs = errors.New("need any of +, ?, *, <int>")
 var ErrAssertionFailure = errors.New("assertion failed")
@@ -73,467 +65,431 @@ var ErrUnallowedDeps = errors.New("unallowed dependencies passed")
 var ErrNameConflict = errors.New("cannot use the same name for positional args and switches")
 
 //////////////////////////////////////////////////
-var num_re = regexp.MustCompile("^[0-9]+$")
-var nargs_re = regexp.MustCompile("^[+*?]+$")
-var end_of_args_re = regexp.MustCompile("^--$")
-var switches = map[string]*Switch{}
-var positionals = map[string]*Positional{}
-var positionals_slices = []*Positional{}
-var parsed = map[string]*switch_ref{}
-var parsed_slices = []*switch_ref{}
-var printf = fmt.Printf
-var head_argv = []string{}
-var tail_argv = []string{}
-
-func errf(err error, obj *Switch) {
-	panic(fmt.Sprintf("%v\nSwitch: %#v\n", err, obj))
-}
-
-func perrf(err error, obj *Positional) {
-	panic(fmt.Sprintf("%v\nPositional: %#v\n", err, obj))
-}
+var numRe = regexp.MustCompile("^[0-9]+$")
+var nargsRe = regexp.MustCompile("^[+*?]+$")
+var headArgv = []string{}
+var tailArgv = []string{}
+var allArgv = []string{}
+var argumentsMap = map[string]*argument{}
+var keywordsMap = map[string]*keyword{}
+var argumentsSlice = []*argument{}
+var keywordsSlice = []*keyword{}
+var parsedMap = map[string][]string{}
+var checkDups = map[string]bool{}
 
 //////////////////////////////////////////////////
-func NewParser(argv []string, exit_on_help bool) *Parser {
+func New(argv []string, exitOnHelp bool) *Parser {
 	if argv == nil {
-		argv = flag.Args()
+		argv = os.Args
 	}
 
-	double_dash := slices.Index(argv, "--")
-	if double_dash != -1 {
-		tail_argv = argv[double_dash+1:]
-		argv = argv[:double_dash]
+	eof := slices.Index(argv, "--")
+	if eof != -1 {
+		tailArgv = argv[eof+1:]
+		argv = argv[:eof]
 	}
 
 	parser := &Parser{
 		Argv:       argv,
-		Switches:   map[string]*Switch{},
-		ExitOnHelp: exit_on_help,
+		ExitOnHelp: exitOnHelp,
 	}
 
-	parser.Switch(
-		Names{"h", "help"},
-		&Switch{Help: "show this help"},
+	parser.Keyword(
+		"h", "help",
+		&Option{Help: "show this help"},
 	)
 
 	return parser
 }
 
-func (parser *Parser) Switch(names []string, opts *Switch) *Parser {
-	names_l := len(names)
-	if names_l == 0 {
-		errf(ErrMissingName, opts)
-	} else if names_l == 1 {
-		names = append(names, "")
+func (parser *Parser) Argument(name string, opts *Option) *Parser {
+	opts.Name = name
+
+	if name == "" {
+		panic(fmt.Errorf("%w\nParser: %#v\n", ErrMissingName, parser))
 	}
 
-	if (len(names) == 0) || ((names[0] == "") && (names[1] == "")) {
-		errf(ErrMissingName, opts)
-	} else if names[1] != "" {
-		opts.Name = names[1]
-	} else if names[0] != "" {
-		opts.Name = names[0]
+	if _, ok := argumentsMap[name]; ok {
+		panic(fmt.Errorf("%w\nOption: %#v\n", ErrNameConflict, opts))
 	}
 
-	for _, n := range names {
-		if _, ok := positionals[n]; ok {
-			errf(ErrNameConflict, opts)
-		}
+	if _, ok := keywordsMap[name]; ok {
+		panic(fmt.Errorf("%w\nOption: %#v\n", ErrNameConflict, opts))
 	}
 
-	opts.Names = names
+	argumentsMap[opts.Name] = &argument{
+		name:  opts.Name,
+		value: "",
+		opts:  opts,
+	}
+
+	argumentsSlice = append(argumentsSlice, argumentsMap[opts.Name])
+
+	return parser
+}
+
+func (parser *Parser) Keyword(short, long string, opts *Option) *Parser {
+	if (short == "") && (long == "") {
+		panic(fmt.Errorf("%w\nParser: %#v\n", ErrMissingName, parser))
+	}
+
+	if long != "" {
+		opts.LongName = long
+		opts.Name = long
+	}
+
+	if short != "" {
+		opts.ShortName = short
+    if opts.Name == "" {
+      opts.Name = short
+    }
+	}
+
+	if _, ok := argumentsMap[opts.Name]; ok {
+		panic(fmt.Errorf("%w\nOption: %#v\n", ErrNameConflict, opts))
+	}
+
+	if _, ok := keywordsMap[opts.Name]; ok {
+		panic(fmt.Errorf("%w\nOption: %#v\n", ErrNameConflict, opts))
+	}
+
 	nargs := &opts.Nargs
-
 	if *nargs != "" {
-		if nargs_re.FindStringIndex(*nargs) == nil {
-			errf(ErrInvalidNargs, opts)
+		if nargsRe.FindStringIndex(*nargs) == nil {
+			panic(fmt.Errorf("%w\nOption: %#v\n", ErrInvalidNargs, opts))
 		}
 		opts.N = -1
 	}
 
-	switches[opts.Name] = opts
-	opts.find(parser)
-
-	return parser
-}
-
-func (parser *Parser) Required(names []string, opts *Switch) *Parser {
-	opts.Required = true
-	return parser.Switch(names, opts)
-}
-
-func (parser *Parser) Positional(name string, opts *Positional) *Parser {
-	if _, ok := switches[name]; ok {
-		perrf(ErrNameConflict, opts)
+	keywordsMap[opts.Name] = &keyword{
+		name:  opts.Name,
+		pos:   -1,
+		value: "",
+		opts:  opts,
 	}
 
-	opts.Name = name
-	positionals_slices = append(positionals_slices, opts)
-	positionals[name] = opts
-
 	return parser
 }
 
-func (S *Switch) find(parser *Parser) []int {
-	exit_on_help := parser.ExitOnHelp
+func (parser *Parser) Find() {
+	exitOnHelp := parser.ExitOnHelp
 	argv := parser.Argv
-	pos := []int{}
-	dup := S.AllowDuplicates
-	req := S.Required
-	names := S.Names
+
 	matches := func(prefix string, a string, b string) bool {
 		a = strings.Join([]string{prefix, a}, "")
 		return a == b
 	}
 
-	for i, v := range argv {
-		short_matched := false
+  find := func(x *keyword) {
+    opts := x.opts
+    dup := opts.AllowDuplicates
+    req := opts.Required
 
-		if names[0] != "" && matches("-", names[0], v) {
-			if v == "-h" && exit_on_help {
-				fmt.Println(parser.String(true))
-				os.Exit(0)
-			}
-			pos = append(pos, i)
-			short_matched = true
-		}
+    for i, v := range argv {
+      matched := -1
 
-		if !short_matched && matches("--", names[1], v) {
-			if v == "--help" && exit_on_help {
-				fmt.Println(parser.String(false))
-				os.Exit(0)
-			}
-			pos = append(pos, i)
-		}
+      if opts.ShortName != "" && matches("-", opts.ShortName, v) {
+        if v == "-h" && exitOnHelp {
+          os.Exit(0)
+        }
+        matched = i
+      }
 
-		if len(pos) == 0 && req {
-			errf(ErrNoArgs, S)
-		}
+      if matched == -1 && matches("--", opts.LongName, v) {
+        if v == "--help" && exitOnHelp {
+          os.Exit(0)
+        }
+        matched = i
+      }
+
+      if matched == -1 && req {
+        panic(fmt.Errorf("%w\nkeyword arg: %#v\n", ErrNoArgs, x))
+      }
+
+      if matched != -1 {
+        y := *x
+        y.pos = i
+        keywordsSlice = append(keywordsSlice, &y)
+        if checkDups[opts.Name] && !dup {
+          panic(fmt.Errorf("%w\nkeyword arg: %#v\n", ErrDuplicate, x))
+        } else {
+          checkDups[opts.Name] = true
+        }
+      }
+    }
+  }
+
+	for _, v := range keywordsMap {
+		find(v)
 	}
 
-	if len(pos) > 1 && !dup {
-		errf(ErrDuplicate, S)
-	}
-
-	if len(pos) > 0 {
-		for _, v := range pos {
-			parsed_slices = append(parsed_slices, &switch_ref{
-				ref:  S,
-				pos:  v,
-				args: []string{},
-			})
+	slices.SortFunc(keywordsSlice, func(a, b *keyword) int {
+		if a.pos < b.pos {
+			return -1
 		}
-	}
-
-	S.Found = true
-	return pos
+		return 1
+	})
 }
 
-func (parser *Parser) extract() {
-	slices.SortFunc(
-		parsed_slices,
-		func(a *switch_ref, b *switch_ref) int {
-			if a.pos < b.pos {
-				return -1
-			}
-			return 1
-		},
-	)
-
-	parsed_slices_l := len(parsed_slices)
-	first := parsed_slices[0]
-	last := parsed_slices[parsed_slices_l-1]
+func (parser *Parser) Extract() {
 	argv := parser.Argv
-	l := len(argv)
-	validate_n := func(S *Switch) {
-		n := S.N
-		nargs := S.Nargs
-		args := S.Value
-		gotten := len(args)
+	first := keywordsSlice[0]
+	keywordsL := len(keywordsSlice)
+	last := keywordsSlice[keywordsL-1]
 
-		if (n == 0 || nargs == "?" || nargs == "*") && gotten == 0 {
-			return
-		} else if n != -1 {
-			if n > gotten {
-				errf(ErrLessArgs, S)
-			} else if n < gotten {
-				errf(ErrExcessArgs, S)
+  if first.pos != 0 {
+		headArgv = argv[:first.pos]
+	}
+
+	for i := 0; i < keywordsL-1; i++ {
+		current := keywordsSlice[i]
+		next := keywordsSlice[i+1]
+
+		if _, ok := parsedMap[current.name]; !ok {
+			parsedMap[current.name] = []string{}
+		}
+
+    res := append(parsedMap[current.name], argv[current.pos+1:next.pos]...)
+		parsedMap[current.name] = res
+	}
+
+	parsedMap[last.name] = argv[last.pos+1:]
+	lastArgs := parsedMap[last.name]
+	lastArgsL := len(lastArgs)
+	lastNargs := last.opts.Nargs
+	lastN := last.opts.N
+
+	if lastN != -1 {
+		if lastArgsL > lastN {
+			parsedMap[last.name] = argv[last.pos+1 : last.pos+lastN+1]
+			tailArgv = append(argv[last.pos+lastN:], tailArgv...)
+		} else if lastN == 0 {
+			if lastArgsL > 0 {
+				panic(fmt.Errorf("%w\nswitch: %#v\n", ErrExcessArgs, last.opts))
 			}
-			return
-		}
-
-		switch nargs {
-		case "+":
-			if gotten == 0 {
-				errf(ErrLessArgs, S)
-			}
-		case "?":
-			if gotten > 1 {
-				errf(ErrExcessArgs, S)
-			}
-		}
-	}
-
-	if first.pos != 0 {
-		head_argv = argv[:first.pos]
-	}
-
-	if last.pos != l-1 {
-		last.args = argv[last.pos+1:]
-	}
-
-	for i := 0; i < parsed_slices_l-1; i++ {
-		current := parsed_slices[i]
-		next := parsed_slices[i+1]
-		current.args = argv[current.pos+1 : next.pos]
-	}
-
-	for i := 0; i < parsed_slices_l-1; i++ {
-		v := parsed_slices[i]
-		ref := v.ref
-		ref.Value = append(ref.Value, v.args...)
-	}
-
-	for _, v := range switches {
-		if !v.Found || v == last.ref {
-			continue
-		}
-		validate_n(v)
-	}
-
-	last_args := last.args
-	last_gotten := len(last_args)
-	last_nargs := last.ref.Nargs
-	last_n := last.ref.N
-	last.ref.Value = last.args
-
-	if last_n != -1 {
-		if last_gotten == 0 && last_n != 0 {
-			errf(ErrLessArgs, last.ref)
-		} else if last_n > last_gotten {
-			errf(ErrLessArgs, last.ref)
-		} else {
-			last_args = argv[last.pos+1 : last.pos+last_gotten]
-			tail_argv = append(argv[last.pos+last_gotten:], tail_argv...)
-			last.ref.Value = last_args
-		}
-	}
-
-	switch last_nargs {
-	case "+":
-		if last_gotten == 0 {
-			errf(ErrLessArgs, last.ref)
-		}
-	case "*":
-		if last_gotten > 1 {
-			errf(ErrExcessArgs, last.ref)
-		}
-	}
-
-	head_argv = append(head_argv, tail_argv...)
-	argv_l := len(head_argv)
-	pos := positionals_slices
-	pos_l := len(pos)
-
-	if pos_l < argv_l {
-		for i := pos_l; i < argv_l; i++ {
-			parser.Positional(strconv.Itoa(i), &Positional{})
+		} else if lastN > lastArgsL {
+			panic(fmt.Errorf("%w\nswitch: %#v\n", ErrLessArgs, last.opts))
 		}
 	} else {
-		panic(
-			fmt.Errorf(
-				"%w\nexpected %d arguments, got %d\n",
-				ErrLessPositionalArgs,
-				pos_l,
-				argv_l,
-			),
-		)
+		switch lastNargs {
+		case "+":
+			if lastArgsL == 0 {
+				panic(fmt.Errorf("%w\nswitch: %#v\n", ErrLessArgs, last.opts))
+			}
+		case "?":
+			if lastArgsL > 1 {
+				panic(fmt.Errorf("%w\nswitch: %#v\n", ErrExcessArgs, last.opts))
+			}
+		}
 	}
 
-	for i, v := range head_argv {
-		positionals_slices[i].Value = v
+	allArgv = append(headArgv, tailArgv...)
+	allArgvL := len(allArgv)
+	argumentsSliceL := len(argumentsSlice)
+
+	if allArgvL < argumentsSliceL {
+		panic(fmt.Errorf("%w\nreason: expected %d args, got %d\n", ErrLessArgs, argumentsSliceL, allArgvL))
+	}
+
+	for i, v := range argumentsSlice {
+    res := []string{allArgv[i]}
+		parsedMap[v.name] = res
+		parsedMap[strconv.Itoa(i)] = res
+	}
+
+	for i := argumentsSliceL; i < allArgvL; i++ {
+		name := strconv.Itoa(i)
+		parsedMap[name] = []string{argv[i]}
 	}
 }
 
-func (parser *Parser) process_positional() {
-	for _, v := range positionals_slices {
-		a := v.Value
+func (parser *Parser) Validate() {
+	last := keywordsSlice[len(keywordsSlice)-1]
 
-		if v.Enum != nil {
-			if slices.Index(v.Enum, a) == -1 {
-				panic(fmt.Sprintf(
-					"%v\nChoices: %s\n%#v\n",
-					ErrInvalidChoice,
-					strings.Join(v.Enum, ","),
-					v,
-				))
-			} else {
-				continue
-			}
+	checkAssert := func(name, nameType string, assert func(s string) error, xs []string) {
+		if assert == nil {
+			return
 		}
 
-		if v.Assert != nil {
-			if ok, msg := v.Assert(a); !ok {
-				panic(fmt.Sprintf(
-					"%v\nMessage: %s\n%#v\n",
+		for _, x := range xs {
+			if err := assert(x); err != nil {
+				panic(fmt.Errorf(
+					"%w\nAssertion failure for %s [%s]\n",
 					ErrAssertionFailure,
-					msg,
-					v,
+					name,
+					nameType,
 				))
 			}
 		}
+	}
 
-		if v.Map != nil {
-			v.Value = v.Map(a)
+	checkEnum := func(name, nameType string, enum, xs []string) {
+		if enum == nil {
+			return
+		}
+
+		for _, x := range xs {
+			if slices.Index(enum, x) == -1 {
+				panic(fmt.Sprintf(
+          "%v\nChoices: %s\nGiven: %s\n%s [%s]\n",
+					ErrInvalidChoice,
+					strings.Join(enum, ","),
+					strings.Join(xs, ","),
+					name,
+					nameType,
+				))
+			}
 		}
 	}
-}
 
-func (parser *Parser) process_switches() {
-	for _, v := range switches {
-		deps := v.Requires
-		excludes := v.Excludes
+	for name, args := range parsedMap {
+		if name == last.name {
+			continue
+		}
 
-		if excludes != nil {
-			for _, d := range excludes {
-				_, ok := switches[d]
-				if ok {
-					panic(fmt.Sprintf(
-						"%v\nUnallowed switch: %s\n%#v\n",
-						ErrUnallowedDeps,
-						d,
-						v,
-					))
+		var keywordX *keyword
+		var argX *argument
+
+		if x, ok := keywordsMap[name]; ok {
+			keywordX = x
+		} else if x, ok := argumentsMap[name]; ok {
+			argX = x
+		}
+
+		if keywordX != nil {
+			opts := keywordX.opts
+			n := opts.N
+			nargs := opts.Nargs
+			gotten := len(args)
+
+			if (n == 0 || nargs == "?" || nargs == "*") && gotten == 0 {
+				return
+			} else if n != -1 {
+				if n > gotten {
+					panic(fmt.Errorf("%w\nswitch: %#v\n", ErrLessArgs, opts))
+				} else if n < gotten {
+					panic(fmt.Errorf("%w\nswitch: %#v\n", ErrExcessArgs, opts))
+				}
+				return
+			}
+
+			switch nargs {
+			case "+":
+				if gotten == 0 {
+					panic(fmt.Errorf("%w\nswitch: %#v\n", ErrLessArgs, opts))
+				}
+			case "?":
+				if gotten > 1 {
+					panic(fmt.Errorf("%w\nswitch: %#v\n", ErrExcessArgs, opts))
+				}
+			}
+
+			checkEnum(name, "keyword", opts.Enum, args)
+			checkAssert(name, "keyword", opts.Assert, args)
+
+			if opts.Map != nil {
+				for i, v := range args {
+					parsedMap[name][i] = opts.Map(v)
 				}
 			}
 		}
 
-		if deps != nil {
-			for _, d := range deps {
-				_, ok := switches[d]
-				if !ok {
-					panic(fmt.Sprintf(
-						"%v\nMissing switch: %s\n%#v\n",
-						ErrMissingDeps,
-						d,
-						v,
-					))
-				}
-			}
-		}
+    argx, ok := argumentsMap[name]
+    if !ok {
+      continue
+    }
 
-		for i, a := range v.Value {
-			if v.Enum != nil {
-				if slices.Index(v.Enum, a) == -1 {
-					panic(fmt.Sprintf(
-						"%v\nChoices: %s\n%#v\n",
-						ErrInvalidChoice,
-						strings.Join(v.Enum, ","),
-						v,
-					))
-				} else {
-					continue
-				}
-			}
+    argX = argx
+		opts := argX.opts
+		checkEnum(name, "argument", argX.opts.Enum, args)
+		checkAssert(name, "argument", argX.opts.Assert, args)
 
-			if v.Assert != nil {
-				if ok, msg := v.Assert(a); !ok {
-					panic(fmt.Sprintf(
-						"%v\nMessage: %s\n%#v\n",
-						ErrAssertionFailure,
-						msg,
-						v,
-					))
-				}
-			}
-
-			if v.Map != nil {
-				v.Value[i] = v.Map(a)
+		if opts.Map != nil {
+			for i, v := range args {
+				parsedMap[name][i] = opts.Map(v)
 			}
 		}
 	}
 }
 
-func (parser *Parser) process() {
-	parser.extract()
-	parser.process_switches()
-	parser.process_positional()
+func (parser *Parser) Parse() map[string][]string {
+	parser.Find()
+	parser.Extract()
+	parser.Validate()
+	parser.Parsed = parsedMap
+
+	return parsedMap
 }
 
-func (parser *Parser) Parse() *Parser {
-	parser.process()
-	parser.Switches = switches
-	parser.Positionals = positionals
-	return parser
+func sentenceLen(x []string) int {
+	n := 0
+	for _, v := range x {
+		n += len(v)
+	}
+	return n
 }
 
-func (parser *Parser) to_map() map[string][]string {
-	out := map[string][]string{}
+func (S *keyword) genHeader() []string {
+	opts := S.opts
+	mvar := opts.Metavar
+	header := []string{}
+	short := opts.ShortName
+	long := opts.LongName
+	nargs := opts.Nargs
+	n := opts.N
 
-	for _, v := range parser.Switches {
-		out[v.Name] = v.Value
+	push := func(s string) {
+		header = append(header, s)
 	}
 
-	for _, v := range parser.Positionals {
-		out[v.Name] = []string{v.Value}
+	if short != "" {
+		push(short)
+	} else {
+		push(long)
 	}
 
-	return out
+	if mvar == "" {
+		if short != "" {
+			mvar = strings.ToUpper(short)
+		} else {
+			mvar = "STR"
+		}
+	}
+
+	if nargs != "" {
+		switch nargs {
+		case "?":
+			push(fmt.Sprintf("[%s]", mvar))
+		case "*":
+			push(fmt.Sprintf("[%s, ...]?", mvar))
+		case "+":
+			push(fmt.Sprintf("{%s, ...}", mvar))
+		}
+	} else if n > 0 {
+		push(fmt.Sprintf("%s{%d}", mvar, n))
+	}
+
+	return header
 }
 
-func (parser *Parser) ParseMap() map[string][]string {
-	parser.process()
-	parser.Switches = switches
-	parser.Positionals = positionals
-  return parser.to_map()
-}
-
-func (S *Switch) header() string {
+func (parser *Parser) genHeader() string {
 	var header string
 	return header
 }
 
-func (parser *Parser) header() string {
-	var header string
-	return header
-}
-
-func (S *Switch) String(summary bool) string {
+func (S *argument) genHelp(summary bool) string {
 	var res string
 	return res
 }
 
-func (parser *Parser) String(summary bool) string {
+func (parser *Parser) genHelp(summary bool) string {
 	var res string
 	return res
-}
-
-func (parser *Parser) Get(key string) []string {
-	x, ok := parser.Switches[key]
-	if !ok {
-		X, OK := parser.Positionals[key]
-		if OK {
-			return []string{X.Value}
-		}
-		return nil
-	}
-	return x.Value
-}
-
-func (parser *Parser) At(key int) (string, bool) {
-	x, ok := parser.Positionals[strconv.Itoa(key)]
-	if !ok {
-		if key > -1 && key < len(parser.Argv) {
-			return parser.Argv[key], true
-		}
-		return "", false
-	}
-	return x.Value, true
 }
 
 //////////////////////////////////////////////////
 func main() {
-	parser := NewParser([]string{
+	parser := New([]string{
 		"11",
 		"-A", "1", "2", "3",
 		"--a-switch", "4", "5", "6",
@@ -546,23 +502,24 @@ func main() {
 		"3",
 	}, true)
 
-	parser.Switch(
-		Names{"A", "a-switch"},
-		&Switch{
+	parser.Keyword(
+		"A", "a-switch",
+		&Option{
 			Nargs:           "+",
 			AllowDuplicates: true,
+      Enum: []string{"1", "2", "3", "4", "5", "6"},
 		},
 	)
 
-	parser.Switch(
-		Names{"B", "b-switch"},
-		&Switch{N: 1},
+	parser.Keyword(
+		"B", "b-switch",
+		&Option{N: 1, AllowDuplicates: true},
 	)
 
-	parser.Positional("X", &Positional{})
+	parser.Argument("X", &Option{})
 
-  res := parser.ParseMap()
-  for name, v := range res {
-    fmt.Printf("%s: %#v\n", name, v)
-  }
+	res := parser.Parse()
+	for name, v := range res {
+		fmt.Printf("%s: %#v\n", name, v)
+	}
 }
