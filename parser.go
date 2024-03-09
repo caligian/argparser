@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"golang.org/x/term"
 	"os"
 	"regexp"
 	"slices"
@@ -36,18 +37,16 @@ type argument struct {
 type keyword struct {
 	name  string
 	pos   int
-  allPos []int
 	value string
 	opts  *Option
 }
 
 type Parser struct {
 	Argv       []string
-	Desc       string
-	Header     string
-	Footer     string
+	Help       string
 	ExitOnHelp bool
 	Parsed     map[string][]string
+	Summary string
 }
 
 //////////////////////////////////////////////////
@@ -65,6 +64,19 @@ var ErrUnallowedDeps = errors.New("unallowed dependencies passed")
 var ErrNameConflict = errors.New("cannot use the same name for positional args and switches")
 
 //////////////////////////////////////////////////
+func getTermWidth() int {
+	defaultwidth := 60
+	if term.IsTerminal(0) {
+		return defaultwidth
+	} else {
+		width, _, err := term.GetSize(0)
+		if err != nil {
+			return defaultwidth
+		}
+		return width
+	}
+}
+
 var numRe = regexp.MustCompile("^[0-9]+$")
 var nargsRe = regexp.MustCompile("^[+*?]+$")
 var headArgv = []string{}
@@ -76,9 +88,11 @@ var argumentsSlice = []*argument{}
 var keywordsSlice = []*keyword{}
 var parsedMap = map[string][]string{}
 var checkDups = map[string]bool{}
+var termWidth = getTermWidth()
+var textWidth = termWidth / 2
 
 //////////////////////////////////////////////////
-func New(argv []string, exitOnHelp bool) *Parser {
+func New(argv []string) *Parser {
 	if argv == nil {
 		argv = os.Args
 	}
@@ -91,7 +105,6 @@ func New(argv []string, exitOnHelp bool) *Parser {
 
 	parser := &Parser{
 		Argv:       argv,
-		ExitOnHelp: exitOnHelp,
 	}
 
 	parser.Keyword(
@@ -140,9 +153,9 @@ func (parser *Parser) Keyword(short, long string, opts *Option) *Parser {
 
 	if short != "" {
 		opts.ShortName = short
-    if opts.Name == "" {
-      opts.Name = short
-    }
+		if opts.Name == "" {
+			opts.Name = short
+		}
 	}
 
 	if _, ok := argumentsMap[opts.Name]; ok {
@@ -176,48 +189,48 @@ func (parser *Parser) Find() {
 	argv := parser.Argv
 
 	matches := func(prefix string, a string, b string) bool {
-		a = strings.Join([]string{prefix, a}, "")
-		return a == b
+		return (prefix + a) == b
 	}
 
-  find := func(x *keyword) {
-    opts := x.opts
-    dup := opts.AllowDuplicates
-    req := opts.Required
+	find := func(x *keyword) {
+		opts := x.opts
+		dup := opts.AllowDuplicates
+		req := opts.Required
 
-    for i, v := range argv {
-      matched := -1
+		for i, v := range argv {
+			matched := -1
+			if opts.ShortName != "" && matches("-", opts.ShortName, v) {
+				if v == "-h" && exitOnHelp {
+					fmt.Println(parser.genHeader())
+					os.Exit(0)
+				}
+				matched = i
+			}
 
-      if opts.ShortName != "" && matches("-", opts.ShortName, v) {
-        if v == "-h" && exitOnHelp {
-          os.Exit(0)
-        }
-        matched = i
-      }
+			if matched == -1 && matches("--", opts.LongName, v) {
+				if v == "--help" && exitOnHelp {
+					fmt.Println(parser.genHelp())
+					os.Exit(0)
+				}
+				matched = i
+			}
 
-      if matched == -1 && matches("--", opts.LongName, v) {
-        if v == "--help" && exitOnHelp {
-          os.Exit(0)
-        }
-        matched = i
-      }
+			if matched == -1 && req {
+				panic(fmt.Errorf("%w\nkeyword arg: %#v\n", ErrNoArgs, x))
+			}
 
-      if matched == -1 && req {
-        panic(fmt.Errorf("%w\nkeyword arg: %#v\n", ErrNoArgs, x))
-      }
-
-      if matched != -1 {
-        y := *x
-        y.pos = i
-        keywordsSlice = append(keywordsSlice, &y)
-        if checkDups[opts.Name] && !dup {
-          panic(fmt.Errorf("%w\nkeyword arg: %#v\n", ErrDuplicate, x))
-        } else {
-          checkDups[opts.Name] = true
-        }
-      }
-    }
-  }
+			if matched != -1 {
+				y := *x
+				y.pos = i
+				keywordsSlice = append(keywordsSlice, &y)
+				if checkDups[opts.Name] && !dup {
+					panic(fmt.Errorf("%w\nkeyword arg: %#v\n", ErrDuplicate, x))
+				} else {
+					checkDups[opts.Name] = true
+				}
+			}
+		}
+	}
 
 	for _, v := range keywordsMap {
 		find(v)
@@ -237,7 +250,7 @@ func (parser *Parser) Extract() {
 	keywordsL := len(keywordsSlice)
 	last := keywordsSlice[keywordsL-1]
 
-  if first.pos != 0 {
+	if first.pos != 0 {
 		headArgv = argv[:first.pos]
 	}
 
@@ -249,7 +262,7 @@ func (parser *Parser) Extract() {
 			parsedMap[current.name] = []string{}
 		}
 
-    res := append(parsedMap[current.name], argv[current.pos+1:next.pos]...)
+		res := append(parsedMap[current.name], argv[current.pos+1:next.pos]...)
 		parsedMap[current.name] = res
 	}
 
@@ -292,7 +305,7 @@ func (parser *Parser) Extract() {
 	}
 
 	for i, v := range argumentsSlice {
-    res := []string{allArgv[i]}
+		res := []string{allArgv[i]}
 		parsedMap[v.name] = res
 		parsedMap[strconv.Itoa(i)] = res
 	}
@@ -331,7 +344,7 @@ func (parser *Parser) Validate() {
 		for _, x := range xs {
 			if slices.Index(enum, x) == -1 {
 				panic(fmt.Sprintf(
-          "%v\nChoices: %s\nGiven: %s\n%s [%s]\n",
+					"%v\nChoices: %s\nGiven: %s\n%s [%s]\n",
 					ErrInvalidChoice,
 					strings.Join(enum, ","),
 					strings.Join(xs, ","),
@@ -394,12 +407,12 @@ func (parser *Parser) Validate() {
 			}
 		}
 
-    argx, ok := argumentsMap[name]
-    if !ok {
-      continue
-    }
+		argx, ok := argumentsMap[name]
+		if !ok {
+			continue
+		}
 
-    argX = argx
+		argX = argx
 		opts := argX.opts
 		checkEnum(name, "argument", argX.opts.Enum, args)
 		checkAssert(name, "argument", argX.opts.Assert, args)
@@ -429,7 +442,7 @@ func sentenceLen(x []string) int {
 	return n
 }
 
-func (S *keyword) genHeader() []string {
+func (S *keyword) genHeader(useLong bool) string {
 	opts := S.opts
 	mvar := opts.Metavar
 	header := []string{}
@@ -443,9 +456,13 @@ func (S *keyword) genHeader() []string {
 	}
 
 	if short != "" {
-		push(short)
+		if useLong && long != "" {
+			push("-" + short + ", --" + long)
+		} else {
+			push("-" + short)
+		}
 	} else {
-		push(long)
+		push("--" + long)
 	}
 
 	if mvar == "" {
@@ -461,65 +478,233 @@ func (S *keyword) genHeader() []string {
 		case "?":
 			push(fmt.Sprintf("[%s]", mvar))
 		case "*":
-			push(fmt.Sprintf("[%s, ...]?", mvar))
+			push(fmt.Sprintf("[%s,...]", mvar))
 		case "+":
-			push(fmt.Sprintf("{%s, ...}", mvar))
+			push(fmt.Sprintf("{%s,...}", mvar))
 		}
 	} else if n > 0 {
-		push(fmt.Sprintf("%s{%d}", mvar, n))
+		if n == 1 {
+			push(fmt.Sprintf("{%s}", mvar))
+		} else {
+			push(fmt.Sprintf("{%s<%d>}", mvar, n))
+		}
 	}
 
-	return header
+	return strings.Join(header, " ")
+}
+
+func (x *argument) genHeader() string {
+	mvar := x.opts.Metavar
+	if mvar == "" {
+		mvar = strings.ToUpper(x.name)
+	}
+	return fmt.Sprintf("%s", mvar)
 }
 
 func (parser *Parser) genHeader() string {
-	var header string
-	return header
+	scriptName := parser.Summary
+	header := strings.Builder{}
+	header.WriteString("Usage: ")
+	header.WriteString(scriptName)
+	header.WriteString(" ")
+	scriptNameL := header.Len()
+	ws := strings.Repeat(" ", scriptNameL)
+
+	if scriptNameL > termWidth {
+		header.WriteString("\n")
+		ws = strings.Repeat(" ", textWidth)
+		header.WriteString(ws)
+	}
+
+	totalLen := scriptNameL
+
+	for _, v := range argumentsSlice {
+		h := v.genHeader()
+		hL := len(h)
+
+		if totalLen >= termWidth {
+			totalLen = 0
+			header.WriteString("\n")
+			header.WriteString(ws)
+			header.WriteString(h)
+			totalLen += scriptNameL
+		} else {
+			header.WriteString(h)
+		}
+
+		header.WriteString(" ")
+		totalLen += hL + 1
+	}
+
+	for _, v := range keywordsMap {
+		h := v.genHeader(false)
+		hL := len(h)
+
+		if totalLen >= termWidth {
+			totalLen = 0
+			header.WriteString("\n")
+			header.WriteString(ws)
+			header.WriteString(h)
+			totalLen += scriptNameL
+		} else {
+			header.WriteString(h)
+		}
+
+		header.WriteString(" ")
+		totalLen += hL + 1
+	}
+
+	return header.String()
 }
 
-func (S *argument) genHelp(summary bool) string {
-	var res string
-	return res
+func (S *argument) genHelp() string {
+	res := strings.Builder{}
+	header := S.genHeader()
+	res.WriteString(header)
+	ws := strings.Repeat(" ", textWidth)
+	totalLen := 0
+
+	if diff := textWidth - len(header); diff > 0 {
+		more := strings.Repeat(" ", diff)
+		res.WriteString(more)
+	}
+
+	for _, v := range strings.Split(S.opts.Help, " ") {
+		vL := len(v)
+
+		if totalLen >= textWidth || totalLen+vL >= textWidth {
+			totalLen = 0
+			res.WriteString("\n")
+			res.WriteString(ws)
+			res.WriteString(v)
+		} else {
+			res.WriteString(v)
+		}
+
+		res.WriteString(" ")
+		totalLen += vL + 1
+	}
+
+	return res.String()
 }
 
-func (parser *Parser) genHelp(summary bool) string {
-	var res string
-	return res
+func (S *keyword) genHelp() string {
+	res := strings.Builder{}
+	header := S.genHeader(true)
+	res.WriteString(header)
+	ws := strings.Repeat(" ", textWidth)
+	totalLen := 0
+
+	if diff := textWidth - len(header); diff > 0 {
+		more := strings.Repeat(" ", diff)
+		res.WriteString(more)
+	}
+
+	for _, v := range strings.Split(S.opts.Help, " ") {
+		vL := len(v)
+		if totalLen >= textWidth || totalLen+vL >= textWidth {
+			totalLen = 0
+			res.WriteString("\n")
+			res.WriteString(ws)
+			res.WriteString(v)
+		} else {
+			res.WriteString(v)
+		}
+
+		res.WriteString(" ")
+		totalLen += vL + 1
+	}
+
+	return res.String()
+}
+
+func (parser *Parser) genHelp() string {
+	res := strings.Builder{}
+	res.WriteString(parser.genHeader())
+	res.WriteString("\n\n")
+	totalLen := 0
+
+	for _, v := range strings.Split(parser.Help, " ") {
+		vL := len(v)
+		if totalLen >= termWidth || totalLen+vL >= termWidth {
+			totalLen = 0
+			res.WriteString("\n")
+			res.WriteString(v)
+		} else {
+			res.WriteString(v)
+		}
+
+		res.WriteString(" ")
+		totalLen += vL + 1
+	}
+
+	res.WriteString("\n\nArguments:\n")
+	for _, v := range argumentsMap {
+		res.WriteString(v.genHelp())
+		res.WriteString("\n")
+	}
+
+	res.WriteString("\nKeyword arguments:\n")
+	for _, v := range keywordsMap {
+		res.WriteString(v.genHelp())
+		res.WriteString("\n")
+	}
+
+	return res.String()
 }
 
 //////////////////////////////////////////////////
 func main() {
 	parser := New([]string{
+		// "--help",
 		"11",
-		"-A", "1", "2", "3",
+		"-a", "1", "2", "3",
 		"--a-switch", "4", "5", "6",
-		"-B",
+		"-b",
 		"a",
 		"b",
 		"--",
 		"1",
 		"2",
 		"3",
-	}, true)
+	})
+
+	parser.ExitOnHelp = true
+	parser.Help = "this is an app that will fucking change your life for good you know!"
+	parser.Summary = "bhangar ki shakal ke laude"
 
 	parser.Keyword(
-		"A", "a-switch",
+		"a", "a-switch",
 		&Option{
 			Nargs:           "+",
+			// N:               6,
 			AllowDuplicates: true,
-      Enum: []string{"1", "2", "3", "4", "5", "6"},
+			Enum:            []string{"1", "2", "3", "4", "5", "6"},
+			Help:            "this helps you to cure cancer",
 		},
 	)
 
 	parser.Keyword(
-		"B", "b-switch",
-		&Option{N: 1, AllowDuplicates: true},
+		"b", "b-switch",
+		&Option{Nargs: "*", AllowDuplicates: true, Help: "this helps you to take a huge shit"},
 	)
 
-	parser.Argument("X", &Option{})
+	parser.Argument("x", &Option{
+		Help: "this will help you to grow your dick size by over 99%!",
+	})
 
-	res := parser.Parse()
-	for name, v := range res {
-		fmt.Printf("%s: %#v\n", name, v)
-	}
+	parser.Argument("y", &Option{
+		Help: "this will help you to grow your left boob size by over 99%!",
+	})
+
+	// parse all the arguments
+	// res := parser.Parse()
+	// for name, v := range res {
+	// 	fmt.Printf("%s: %#v\n",name, v)
+	// }
+
+	// fmt.Printf("%#v\n", res)
+	//fmt.Printf("%#v\n", argumentsMap["X"].genHeader())
+	// fmt.Printf("%s\n", keywordsMap["a-switch"].genHelp())
+	// println(parser.genHelp())
 }
