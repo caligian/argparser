@@ -46,7 +46,7 @@ type Parser struct {
 	Help       string
 	ExitOnHelp bool
 	Parsed     map[string][]string
-	Summary string
+	Summary    string
 }
 
 //////////////////////////////////////////////////
@@ -104,7 +104,7 @@ func New(argv []string) *Parser {
 	}
 
 	parser := &Parser{
-		Argv:       argv,
+		Argv: argv,
 	}
 
 	parser.Keyword(
@@ -442,7 +442,7 @@ func sentenceLen(x []string) int {
 	return n
 }
 
-func (S *keyword) genHeader(useLong bool) string {
+func (S *keyword) genHeader(useLong bool, addRequiredHint bool) string {
 	opts := S.opts
 	mvar := opts.Metavar
 	header := []string{}
@@ -463,6 +463,10 @@ func (S *keyword) genHeader(useLong bool) string {
 		}
 	} else {
 		push("--" + long)
+	}
+
+	if addRequiredHint && !opts.Required {
+		header[len(header)-1] += "?"
 	}
 
 	if mvar == "" {
@@ -510,7 +514,7 @@ func (parser *Parser) genHeader() string {
 	scriptNameL := header.Len()
 	ws := strings.Repeat(" ", scriptNameL)
 
-	if scriptNameL > termWidth  {
+	if scriptNameL > termWidth {
 		header.WriteString("\n")
 		ws = strings.Repeat(" ", textWidth)
 		header.WriteString(ws)
@@ -522,7 +526,7 @@ func (parser *Parser) genHeader() string {
 		h := v.genHeader()
 		hL := len(h)
 
-		if totalLen >= termWidth || totalLen + hL >= termWidth {
+		if totalLen >= termWidth || totalLen+hL >= termWidth {
 			totalLen = 0
 			header.WriteString("\n")
 			header.WriteString(ws)
@@ -537,10 +541,10 @@ func (parser *Parser) genHeader() string {
 	}
 
 	for _, v := range keywordsMap {
-		h := v.genHeader(false)
+		h := v.genHeader(false, true)
 		hL := len(h)
 
-		if totalLen >= termWidth || totalLen + hL >= termWidth {
+		if totalLen >= termWidth || totalLen+hL >= termWidth {
 			totalLen = 0
 			header.WriteString("\n")
 			header.WriteString(ws)
@@ -561,17 +565,17 @@ func (S *argument) genHelp() string {
 	res := strings.Builder{}
 	header := S.genHeader()
 	res.WriteString(header)
-  headerL := len(header)
-  r := textWidth/3
-  ws := strings.Repeat(" ", r)
-  totalLen := r
+	headerL := len(header)
+	r := textWidth / 3
+	ws := strings.Repeat(" ", r)
+	totalLen := r
 
-	if r < headerL {
-    res.WriteString("\n")
-    res.WriteString(ws)
+	if r <= headerL {
+		res.WriteString("\n")
+		res.WriteString(ws)
 	} else {
-    res.WriteString(strings.Repeat(" ", r - headerL))
-  }
+		res.WriteString(strings.Repeat(" ", r-headerL))
+	}
 
 	for _, v := range strings.Split(S.opts.Help, " ") {
 		vL := len(v)
@@ -581,7 +585,7 @@ func (S *argument) genHelp() string {
 			res.WriteString("\n")
 			res.WriteString(ws)
 			res.WriteString(v)
-      totalLen += r
+			totalLen += r
 		} else {
 			res.WriteString(v)
 		}
@@ -595,28 +599,29 @@ func (S *argument) genHelp() string {
 
 func (S *keyword) genHelp() string {
 	res := strings.Builder{}
-	header := S.genHeader(true)
+	header := S.genHeader(true, true)
 	res.WriteString(header)
-  r := textWidth/3
-  ws := strings.Repeat(" ", r)
-  totalLen := r
-  headerL := len(header)
 
-  if r < headerL {
-    res.WriteString("\n")
-    res.WriteString(ws)
-  } else {
-    res.WriteString(strings.Repeat(" ", r - headerL))
-  }
+	r := textWidth / 3
+	ws := strings.Repeat(" ", r)
+	totalLen := r
+	headerL := len(header)
 
-  for _, v := range strings.Split(S.opts.Help, " ") {
+	if r <= headerL {
+		res.WriteString("\n")
+		res.WriteString(ws)
+	} else {
+		res.WriteString(strings.Repeat(" ", r-headerL))
+	}
+
+	for _, v := range strings.Split(S.opts.Help, " ") {
 		vL := len(v)
 		if totalLen >= termWidth || totalLen+vL >= termWidth {
 			totalLen = 0
 			res.WriteString("\n")
 			res.WriteString(ws)
 			res.WriteString(v)
-      totalLen += r
+			totalLen += r
 		} else {
 			res.WriteString(v)
 		}
@@ -686,16 +691,17 @@ func main() {
 	parser.Keyword(
 		"a", "a-switch",
 		&Option{
-			Nargs:           "+",
+			Nargs: "+",
 			// N:               6,
 			AllowDuplicates: true,
 			Enum:            []string{"1", "2", "3", "4", "5", "6"},
 			Help:            "this helps you to cure cancer",
+			Required:        true,
 		},
 	)
 
 	parser.Keyword(
-		"b", "b-switch",
+		"b", "",
 		&Option{Nargs: "*", AllowDuplicates: true, Help: "this helps you to take a huge shit"},
 	)
 
