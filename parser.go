@@ -541,7 +541,7 @@ func (parser *Parser) genHeader() string {
 	}
 
 	for _, v := range keywordsMap {
-		h := v.genHeader(false, true)
+		h := v.genHeader(false, false)
 		hL := len(h)
 
 		if totalLen >= termWidth || totalLen+hL >= termWidth {
